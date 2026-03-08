@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # audio-switch — DJI Mic + AirPods 音频通道冲突自动修复
-# https://github.com/anthropics/audio-switch
+# https://github.com/andrew-zyf/audio-switch
 # 平台: macOS only
 
 set -euo pipefail
