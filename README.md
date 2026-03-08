@@ -35,7 +35,7 @@ brew install switchaudio-osx
 ### 安装
 
 ```bash
-git clone https://github.com/anthropics/audio-switch.git
+git clone https://github.com/andrew-zyf/audio-switch.git
 cd audio-switch
 bash install.sh
 ```
@@ -80,6 +80,10 @@ launchctl load ~/Library/LaunchAgents/com.audio-switch.agent.plist
 ## 工作原理
 
 脚本通过 [SwitchAudioSource](https://github.com/deweller/switchaudio-osx) 列出当前可用音频设备，按名称模糊匹配识别 DJI Mic 和 AirPods，然后根据规则表执行切换。回退设备通过 `SwitchAudioSource -f json` 的 `uid` 字段识别内建硬件（`BuiltIn`），避免误选显示器音频。
+
+## 版本
+
+v0.1
 
 ## 许可
 
