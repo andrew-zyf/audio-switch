@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# audio-switch — DJI Mic + AirPods 音频通道冲突自动修复
+# audio-switch — macOS 音频设备自动切换（DJI Mic 输入 / AirPods 输出优先）
 # https://github.com/andrew-zyf/audio-switch
 # 平台: macOS only
 
@@ -7,7 +7,10 @@ set -euo pipefail
 
 # --- 依赖 ---
 
-SAS=$(command -v SwitchAudioSource 2>/dev/null || true)
+SAS=""
+for p in /opt/homebrew/bin/SwitchAudioSource /usr/local/bin/SwitchAudioSource; do
+    [[ -x "$p" ]] && SAS="$p" && break
+done
 if [[ -z "$SAS" ]]; then
     echo "[错误] 未找到 SwitchAudioSource，请先安装: brew install switchaudio-osx" >&2
     exit 1
@@ -34,77 +37,63 @@ log() {
     echo "$msg" >> "$LOG_FILE"
 }
 
-# --- 设备查找 ---
-
-# 从 JSONL 中提取内建设备名称（uid 含 BuiltIn）
-# 注意：SwitchAudioSource -f json 输出 JSONL（每设备一行），非标准 JSON 数组
-extract_builtin() {
-    while IFS= read -r line; do
-        local uid name
-        uid=$(echo "$line" | sed -n 's/.*"uid": *"\([^"]*\)".*/\1/p')
-        name=$(echo "$line" | sed -n 's/.*"name": *"\([^"]*\)".*/\1/p')
-        if [[ "${uid,,}" == *builtin* ]]; then
-            echo "$name"
-            return
-        fi
-    done
-}
-
-# 一次性获取设备列表（JSON 格式），同时用于名称匹配和 BuiltIn 查找
-inputs_json=$("$SAS" -a -t input -f json)
-outputs_json=$("$SAS" -a -t output -f json)
-
-# 提取纯名称列表（供 grep 匹配）
-inputs=$(echo "$inputs_json" | sed -n 's/.*"name": *"\([^"]*\)".*/\1/p')
-outputs=$(echo "$outputs_json" | sed -n 's/.*"name": *"\([^"]*\)".*/\1/p')
-
-# 目标设备：模糊匹配，不区分大小写，不硬编码型号
-dji_mic=$(echo "$inputs" | grep -i 'dji' | grep -i 'mic' | head -1 || true)
-airpods=$(echo "$outputs" | grep -i 'airpods' | head -1 || true)
-
-# 回退输入（优先级：内建麦克风 > 含麦克风关键词的外置设备）
-# 外置显示器（HDMI/DP 音频）不会被自动选中
-fallback_input=$(echo "$inputs_json" | extract_builtin)
-if [[ -z "$fallback_input" ]]; then
-    fallback_input=$(echo "$inputs" | grep -iv 'dji' | grep -iv 'airpods' \
-        | grep -iE '麦克风|mic|microphone' | head -1 || true)
-fi
-
-# 回退输出（优先级：内建扬声器/耳机 > 含扬声器/耳机关键词的外置设备）
-fallback_output=$(echo "$outputs_json" | extract_builtin)
-if [[ -z "$fallback_output" ]]; then
-    fallback_output=$(echo "$outputs" | grep -iv 'dji' | grep -iv 'airpods' \
-        | grep -iE '扬声器|耳机|speaker|headphone' | head -1 || true)
-fi
-
-# --- 切换逻辑 ---
-
-current_input=$("$SAS" -c -t input)
-current_output=$("$SAS" -c -t output)
+# --- 设备切换 ---
 
 changed=false
 
-# 输入：DJI Mic 在线 → 锁定；不在线 → 回退到内建麦克风
-if [[ -n "$dji_mic" && "$current_input" != "$dji_mic" ]]; then
-    "$SAS" -t input -s "$dji_mic"
-    log "输入 → $dji_mic"
-    changed=true
-elif [[ -z "$dji_mic" && -n "$fallback_input" && "$current_input" != "$fallback_input" ]]; then
-    "$SAS" -t input -s "$fallback_input"
-    log "输入 → ${fallback_input}（回退）"
-    changed=true
-fi
+# 通用切换函数：如果首选设备在线则锁定，否则回退到 fallback_pat 匹配的设备
+# 用法: switch_device <type> <device_list> <preferred_pat> <fallback_pat>
+switch_device() {
+    local type=$1 devices=$2 preferred_pat=$3 fallback_pat=$4
+    local current preferred fallback label
 
-# 输出：AirPods 在线 → 锁定；不在线 → 回退到内建扬声器/有线耳机
-if [[ -n "$airpods" && "$current_output" != "$airpods" ]]; then
-    "$SAS" -t output -s "$airpods"
-    log "输出 → $airpods"
-    changed=true
-elif [[ -z "$airpods" && -n "$fallback_output" && "$current_output" != "$fallback_output" ]]; then
-    "$SAS" -t output -s "$fallback_output"
-    log "输出 → ${fallback_output}（回退）"
-    changed=true
-fi
+    if [[ "$type" == "input" ]]; then label="输入"; else label="输出"; fi
+
+    current=$("$SAS" -c -t "$type" 2>/dev/null) || {
+        log "[错误] 无法获取当前${label}设备"
+        return 1
+    }
+
+    # 首选设备：正则匹配（-iE），不区分大小写
+    preferred=$(echo "$devices" | grep -iE "$preferred_pat" | head -1 || true)
+
+    if [[ -n "$preferred" ]]; then
+        if [[ "$current" != "$preferred" ]]; then
+            if "$SAS" -t "$type" -s "$preferred"; then
+                log "$label → $preferred"
+                changed=true
+            else
+                log "[错误] 切换${label}至 $preferred 失败"
+            fi
+        fi
+        return
+    fi
+
+    # 首选不在线，回退到内建设备
+    fallback=$(echo "$devices" | grep -iE "$fallback_pat" | head -1 || true)
+    if [[ -z "$fallback" ]]; then
+        log "[警告] ${label}：首选设备离线，且未找到匹配的回退设备"
+        return
+    fi
+    if [[ "$current" != "$fallback" ]]; then
+        if "$SAS" -t "$type" -s "$fallback"; then
+            log "$label → ${fallback}（回退）"
+            changed=true
+        else
+            log "[错误] 切换${label}至 ${fallback}（回退）失败"
+        fi
+    fi
+}
+
+# 纯文本设备列表（SwitchAudioSource 默认输出每行一个设备名；避免 JSONL 解析的 sed 脆弱性）
+inputs=$("$SAS" -a -t input 2>/dev/null) || { log "[错误] 无法获取输入设备列表"; exit 1; }
+outputs=$("$SAS" -a -t output 2>/dev/null) || { log "[错误] 无法获取输出设备列表"; exit 1; }
+
+# 输入：DJI Mic 在线 → 锁定；不在线 → 回退到内建麦克风
+switch_device input "$inputs" "dji.*mic" "MacBook.*麦克风|MacBook.*Mic|内建.*麦克风|Built-in.*Mic"
+
+# 输出：AirPods 在线 → 锁定；不在线 → 回退到内建扬声器
+switch_device output "$outputs" "airpods" "MacBook.*扬声器|MacBook.*Speaker|内建.*扬声器|Built-in.*Speaker"
 
 if $changed; then
     rotate_log
